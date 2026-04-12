@@ -164,8 +164,8 @@ app.post('/offer', rateLimit, async (req, res) => {
 
     if (offer >= threshold) {
       // ── AUTO-ACCEPT: delay for realism ──
-      const delayMin = 0; // TESTING MODE — change to: Math.floor(Math.random() * 120) + 1
-      const delayMs = 3000; // TESTING MODE — change to: delayMin * 60 * 1000
+      const delayMin = Math.floor(Math.random() * 120) + 1;
+      const delayMs = delayMin * 60 * 1000;
       console.log(`[AUTO-ACCEPT] ${offer}€ >= ${threshold}€ — will process in ${delayMin} minutes`);
 
       // Capture all data before setTimeout (req may be gone)
