@@ -45,8 +45,9 @@ const SCOPES = 'write_draft_orders,read_draft_orders,read_products';
 // ── SMTP CONFIG ──
 const smtpTransport = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.ionos.de',
-  port: 465,
-  secure: true,
+  port: 587,
+  secure: false,
+  requireTLS: true,
   auth: {
     user: process.env.SMTP_USER || '',
     pass: process.env.SMTP_PASS || ''
