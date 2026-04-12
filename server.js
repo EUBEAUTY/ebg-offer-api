@@ -188,11 +188,16 @@ app.post('/offer', rateLimit, async (req, res) => {
           if (draftResult.success) {
             console.log(`[DRAFT ORDER] Created #${draftResult.draftOrderId} (after ${delayMin}min delay)`);
 
-            await sendInvoice({
-              email, product, size, offerPrice: offer, listedPrice: parseFloat(listedPrice),
-              watchers: req.body.watchers, invoiceUrl: draftResult.invoiceUrl
-            });
-            console.log(`[INVOICE] Sent for ${product}`);
+            try {
+              await sendInvoice({
+                email, product, size, offerPrice: offer, listedPrice: parseFloat(listedPrice),
+                watchers: req.body.watchers, invoiceUrl: draftResult.invoiceUrl
+              });
+              console.log(`[INVOICE] Sent for ${product}`);
+            } catch (emailErr) {
+              console.error(`[EMAIL ERROR] ${emailErr.message}`);
+              console.error(`[EMAIL ERROR DETAIL]`, emailErr);
+            }
 
             // Schedule expiry check (24h from invoice sent)
             setTimeout(() => checkAndExpire(draftResult.draftOrderId, variantId), 24 * 60 * 60 * 1000);
