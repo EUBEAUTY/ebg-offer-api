@@ -272,23 +272,7 @@ async function sendInvoice(draftOrderId, data) {
   });
 
   const watchers = parseInt(data.watchers) || 0;
-  const watcherLine = watchers > 0 ? `\n${watchers} people are currently watching this item.\n` : '';
-
-  const message =
-    `YOUR OFFER HAS BEEN ACCEPTED\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `${product}\n` +
-    `Size: ${size}\n\n` +
-    `Original Price: ${listedPrice}€\n` +
-    `Your Offer: ${offerPrice}€\n` +
-    `You Save: ${savings}€\n\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `⚠️ PAY WITHIN 24 HOURS\n` +
-    `Deadline: ${deadlineStr}\n\n` +
-    `This item is still available to other buyers. ${watcherLine}` +
-    `Other customers can purchase it at full price or submit a higher offer at any time. Complete your payment to secure it.\n\n` +
-    `Click the link below to pay now.\n\n` +
-    `— European Beauty Group`;
+  const message = watchers > 0 ? `${watchers} people are currently watching this item` : '';
 
   await fetch(url, {
     method: 'POST',
