@@ -1,0 +1,212 @@
+const express = require('express');
+const cors = require('cors');
+const fetch = require('node-fetch');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// ── CONFIG (set these as Environment Variables in Render) ──
+const SHOPIFY_STORE = process.env.SHOPIFY_STORE || 'european-beauty-group-2.myshopify.com';
+const SHOPIFY_TOKEN = process.env.SHOPIFY_TOKEN;
+const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL || '';
+const PORT = process.env.PORT || 3000;
+const API_VERSION = '2024-01';
+
+// ── HEALTH CHECK ──
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', service: 'EBG Offer API' });
+});
+
+// ── RECEIVE OFFER ──
+app.post('/offer', async (req, res) => {
+  try {
+    const {
+      product, size, listedPrice, highestOffer,
+      offerPrice, email, name, productUrl, variantId
+    } = req.body;
+
+    console.log(`[OFFER] ${product} | ${offerPrice}€ | ${name} (${email}) | Size: ${size}`);
+
+    const offer = parseFloat(offerPrice);
+    const threshold = parseFloat(highestOffer);
+
+    if (offer >= threshold) {
+      // ── AUTO-ACCEPT: create draft order + send invoice ──
+      console.log(`[AUTO-ACCEPT] ${offer}€ >= ${threshold}€`);
+
+      const draftResult = await createDraftOrder({
+        product, size, listedPrice: parseFloat(listedPrice),
+        offerPrice: offer, email, name, variantId
+      });
+
+      if (draftResult.success) {
+        console.log(`[DRAFT ORDER] Created #${draftResult.draftOrderId}`);
+
+        // Send invoice
+        await sendInvoice(draftResult.draftOrderId, {
+          email, product, size, offerPrice: offer
+        });
+        console.log(`[INVOICE] Sent to ${email}`);
+
+        // Schedule expiry check (24h)
+        setTimeout(() => checkAndExpire(draftResult.draftOrderId), 24 * 60 * 60 * 1000);
+
+        return res.json({
+          status: 'accepted',
+          message: 'Offer accepted! Check your email for the invoice.'
+        });
+      } else {
+        console.error(`[ERROR] Draft order failed:`, draftResult.error);
+        return res.json({ status: 'error', message: 'Failed to process offer.' });
+      }
+
+    } else {
+      // ── BELOW THRESHOLD: just log, send to contact form as fallback ──
+      console.log(`[PENDING] ${offer}€ < ${threshold}€ — needs manual review`);
+
+      // Send notification email via Shopify contact form
+      await sendContactForm({ product, size, listedPrice, highestOffer, offerPrice: offer, email, name, productUrl });
+
+      return res.json({
+        status: 'pending',
+        message: 'Offer submitted for review.'
+      });
+    }
+
+  } catch (err) {
+    console.error('[ERROR]', err);
+    res.status(500).json({ status: 'error', message: err.message });
+  }
+});
+
+// ── CREATE DRAFT ORDER ──
+async function createDraftOrder({ product, size, listedPrice, offerPrice, email, name, variantId }) {
+  const url = `https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders.json`;
+
+  let lineItems;
+  if (variantId) {
+    lineItems = [{
+      variant_id: parseInt(variantId),
+      quantity: 1,
+      applied_discount: {
+        title: 'Accepted Offer',
+        value: (listedPrice - offerPrice).toFixed(2),
+        value_type: 'fixed_amount',
+        description: `Binding offer accepted at ${offerPrice}€`
+      }
+    }];
+  } else {
+    lineItems = [{
+      title: `${product} (Size: ${size})`,
+      price: offerPrice.toString(),
+      quantity: 1
+    }];
+  }
+
+  const payload = {
+    draft_order: {
+      line_items: lineItems,
+      email: email,
+      note: `BINDING OFFER — Auto-accepted\nOriginal: ${listedPrice}€ → Offer: ${offerPrice}€\nCustomer: ${name}`,
+      tags: 'offer,auto-accepted'
+    }
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'X-Shopify-Access-Token': SHOPIFY_TOKEN,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await response.json();
+
+    if (data.draft_order) {
+      return {
+        success: true,
+        draftOrderId: data.draft_order.id,
+        invoiceUrl: data.draft_order.invoice_url
+      };
+    }
+    return { success: false, error: JSON.stringify(data) };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// ── SEND INVOICE ──
+async function sendInvoice(draftOrderId, { email, product, size, offerPrice }) {
+  const url = `https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders/${draftOrderId}/send_invoice.json`;
+
+  await fetch(url, {
+    method: 'POST',
+    headers: {
+      'X-Shopify-Access-Token': SHOPIFY_TOKEN,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      draft_order_invoice: {
+        to: email,
+        subject: 'Your offer has been accepted — E.B.G. Archive',
+        custom_message: `Your offer of ${offerPrice}€ for "${product}" (Size: ${size}) has been accepted!\n\nPlease complete your payment within 24 hours to secure your item.`
+      }
+    })
+  });
+}
+
+// ── CHECK & EXPIRE UNPAID DRAFT ORDERS (24h) ──
+async function checkAndExpire(draftOrderId) {
+  try {
+    const url = `https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders/${draftOrderId}.json`;
+    const response = await fetch(url, {
+      headers: { 'X-Shopify-Access-Token': SHOPIFY_TOKEN }
+    });
+    const data = await response.json();
+
+    if (data.draft_order && data.draft_order.status === 'open') {
+      // Not paid — delete it
+      console.log(`[EXPIRED] Draft order #${draftOrderId} — not paid after 24h, deleting`);
+      await fetch(url, {
+        method: 'DELETE',
+        headers: { 'X-Shopify-Access-Token': SHOPIFY_TOKEN }
+      });
+    } else {
+      console.log(`[PAID] Draft order #${draftOrderId} — status: ${data.draft_order?.status}`);
+    }
+  } catch (err) {
+    console.error(`[EXPIRY CHECK ERROR] ${draftOrderId}:`, err.message);
+  }
+}
+
+// ── FALLBACK: send to Shopify contact form for manual review ──
+async function sendContactForm({ product, size, listedPrice, highestOffer, offerPrice, email, name, productUrl }) {
+  try {
+    const formBody = new URLSearchParams();
+    formBody.append('form_type', 'contact');
+    formBody.append('utf8', '✓');
+    formBody.append('contact[email]', email);
+    formBody.append('contact[body]',
+      `BINDING OFFER (manual review)\n` +
+      `═══════════════\n` +
+      `Product: ${product}\nSize: ${size}\n` +
+      `Listed: ${listedPrice}€\nHighest Offer: ${highestOffer}€\nOffer: ${offerPrice}€\n` +
+      `Customer: ${name}\nEmail: ${email}\n` +
+      `URL: ${productUrl}\n═══════════════`
+    );
+
+    await fetch(`https://${SHOPIFY_STORE}/contact#contact_form`, {
+      method: 'POST',
+      body: formBody
+    });
+  } catch (err) {
+    console.error('[CONTACT FORM ERROR]', err.message);
+  }
+}
+
+app.listen(PORT, () => {
+  console.log(`EBG Offer API running on port ${PORT}`);
+});

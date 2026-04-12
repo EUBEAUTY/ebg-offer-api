@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: ebg-offer-api
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: SHOPIFY_STORE
+        value: european-beauty-group-2.myshopify.com
+      - key: SHOPIFY_TOKEN
+        sync: false
+      - key: NOTIFY_EMAIL
+        sync: false
