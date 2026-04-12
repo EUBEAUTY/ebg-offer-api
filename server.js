@@ -195,23 +195,22 @@ app.post('/offer', rateLimit, async (req, res) => {
             console.log(`[DRAFT ORDER] Created #${draftResult.draftOrderId} (after ${delayMin}min delay)`);
             console.log(`[SENDING EMAIL] to ${offerData.email} with invoice URL: ${draftResult.invoiceUrl}`);
 
-            // Send Shopify's built-in invoice (reliable)
-            try {
-              await sendShopifyInvoice(draftResult.draftOrderId, offerData);
-              console.log(`[INVOICE] Shopify invoice sent for ${offerData.product}`);
-            } catch (invoiceErr) {
-              console.error(`[INVOICE ERROR] ${invoiceErr.message}`);
-            }
-
-            // Also try custom branded email (optional, may fail on free tier)
+            // Send custom branded email
             try {
               await sendCustomEmail({
                 ...offerData,
                 invoiceUrl: draftResult.invoiceUrl
               });
-              console.log(`[CUSTOM EMAIL] Branded email sent for ${offerData.product}`);
+              console.log(`[EMAIL] Branded email sent for ${offerData.product}`);
             } catch (emailErr) {
-              console.log(`[CUSTOM EMAIL] Skipped — SMTP unavailable: ${emailErr.message}`);
+              console.error(`[EMAIL ERROR] ${emailErr.message}`);
+              // Fallback to Shopify invoice if custom email fails
+              try {
+                await sendShopifyInvoice(draftResult.draftOrderId, offerData);
+                console.log(`[FALLBACK] Shopify invoice sent for ${offerData.product}`);
+              } catch (fallbackErr) {
+                console.error(`[FALLBACK ERROR] ${fallbackErr.message}`);
+              }
             }
 
             // Schedule expiry check (24h from invoice sent)
