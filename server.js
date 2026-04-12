@@ -206,18 +206,18 @@ async function sendInvoice(draftOrderId, { email, product, size, offerPrice, lis
   });
 
   const message =
-    `DEIN ANGEBOT WURDE AKZEPTIERT\n` +
+    `YOUR OFFER HAS BEEN ACCEPTED\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
     `${product}\n` +
     `Size: ${size}\n\n` +
-    `Originalpreis: ${listedPrice}€\n` +
-    `Dein Angebot: ${offerPrice}€\n` +
-    `Du sparst: ${savings}€\n\n` +
+    `Original Price: ${listedPrice}€\n` +
+    `Your Offer: ${offerPrice}€\n` +
+    `You Save: ${savings}€\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `⚠️ WICHTIG: Zahle innerhalb von 24 Stunden\n` +
-    `Deadline: ${deadlineStr} Uhr\n\n` +
-    `Dieses Stück ist ein Einzelstück. Wenn du nicht innerhalb von 24 Stunden zahlst, verfällt dein Angebot und das Produkt wird wieder für andere Käufer verfügbar.\n\n` +
-    `Klicke unten auf den Link um die Zahlung abzuschließen.\n\n` +
+    `⚠️ IMPORTANT: Pay within 24 hours\n` +
+    `Deadline: ${deadlineStr}\n\n` +
+    `This is a one-of-a-kind piece. If you don't complete payment within 24 hours, your offer expires and the item becomes available to other buyers.\n\n` +
+    `Click the link below to complete your payment.\n\n` +
     `— European Beauty Group`;
 
   await fetch(url, {
@@ -229,7 +229,7 @@ async function sendInvoice(draftOrderId, { email, product, size, offerPrice, lis
     body: JSON.stringify({
       draft_order_invoice: {
         to: email,
-        subject: `✓ Angebot akzeptiert — ${product} für ${offerPrice}€ | E.B.G. Archive`,
+        subject: `✓ Offer Accepted — ${product} for ${offerPrice}€ | E.B.G. Archive`,
         custom_message: message
       }
     })
