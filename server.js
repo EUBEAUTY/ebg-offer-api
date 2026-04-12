@@ -72,7 +72,8 @@ app.post('/offer', async (req, res) => {
 
           // Send branded invoice with FOMO
           await sendInvoice(draftResult.draftOrderId, {
-            email, product, size, offerPrice: offer, listedPrice: parseFloat(listedPrice)
+            email, product, size, offerPrice: offer, listedPrice: parseFloat(listedPrice),
+            watchers: req.body.watchers
           });
           console.log(`[INVOICE] Sent to ${email}`);
 
@@ -159,7 +160,7 @@ async function createDraftOrder({ product, size, listedPrice, offerPrice, email,
     draft_order: {
       line_items: lineItems,
       email: email,
-      note: `BINDING OFFER — Auto-accepted\nOriginal: ${listedPrice}€ → Offer: ${offerPrice}€\nCustomer: ${name}\nSize: ${size}`,
+      note: `BINDING OFFER — Auto-accepted\nOriginal: ${listedPrice}€ → Offer: ${offerPrice}€\nCustomer: ${name}\nSize: ${size}\nItem not reserved — first to pay secures it.`,
       tags: 'offer,auto-accepted',
       use_customer_default_address: true
     }
@@ -191,7 +192,8 @@ async function createDraftOrder({ product, size, listedPrice, offerPrice, email,
 }
 
 // ── SEND BRANDED INVOICE WITH FOMO ──
-async function sendInvoice(draftOrderId, { email, product, size, offerPrice, listedPrice }) {
+async function sendInvoice(draftOrderId, data) {
+  const { email, product, size, offerPrice, listedPrice } = data;
   const url = `https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders/${draftOrderId}/send_invoice.json`;
 
   const savings = (listedPrice - offerPrice).toFixed(2);
@@ -205,6 +207,9 @@ async function sendInvoice(draftOrderId, { email, product, size, offerPrice, lis
     minute: '2-digit'
   });
 
+  const watchers = parseInt(data.watchers) || 0;
+  const watcherLine = watchers > 0 ? `\n${watchers} people are currently watching this item.\n` : '';
+
   const message =
     `YOUR OFFER HAS BEEN ACCEPTED\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
@@ -214,10 +219,11 @@ async function sendInvoice(draftOrderId, { email, product, size, offerPrice, lis
     `Your Offer: ${offerPrice}€\n` +
     `You Save: ${savings}€\n\n` +
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-    `⚠️ IMPORTANT: Pay within 24 hours\n` +
+    `⚠️ PAY WITHIN 24 HOURS\n` +
     `Deadline: ${deadlineStr}\n\n` +
-    `This is a one-of-a-kind piece. If you don't complete payment within 24 hours, your offer expires and the item becomes available to other buyers.\n\n` +
-    `Click the link below to complete your payment.\n\n` +
+    `This item is still available to other buyers. ${watcherLine}` +
+    `Other customers can purchase it at full price or submit a higher offer at any time. Complete your payment to secure it.\n\n` +
+    `Click the link below to pay now.\n\n` +
     `— European Beauty Group`;
 
   await fetch(url, {
