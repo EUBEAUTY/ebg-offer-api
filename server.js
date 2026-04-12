@@ -163,49 +163,58 @@ app.post('/offer', rateLimit, async (req, res) => {
     if (variantId) processingVariants.delete(variantId);
 
     if (offer >= threshold) {
-      // ── AUTO-ACCEPT: delay 1-120 minutes for realism ──
+      // ── AUTO-ACCEPT: delay for realism ──
       const delayMin = 0; // TESTING MODE — change to: Math.floor(Math.random() * 120) + 1
       const delayMs = 3000; // TESTING MODE — change to: delayMin * 60 * 1000
       console.log(`[AUTO-ACCEPT] ${offer}€ >= ${threshold}€ — will process in ${delayMin} minutes`);
 
-      // Process in background after random delay
+      // Capture all data before setTimeout (req may be gone)
+      const offerData = {
+        product, size, email, name, variantId,
+        listedPrice: parseFloat(listedPrice),
+        offerPrice: offer,
+        watchers: req.body.watchers || '0'
+      };
+
+      // Process in background after delay
       setTimeout(async () => {
         try {
           // Re-check stock before creating draft order
-          if (variantId) {
-            const stock = await checkVariantStock(variantId);
+          if (offerData.variantId) {
+            const stock = await checkVariantStock(offerData.variantId);
             if (stock <= 0) {
-              console.log(`[EXPIRED] Variant ${variantId} sold out before delayed accept`);
+              console.log(`[EXPIRED] Variant ${offerData.variantId} sold out before delayed accept`);
               return;
             }
           }
 
-          const draftResult = await createDraftOrder({
-            product, size, listedPrice: parseFloat(listedPrice),
-            offerPrice: offer, email, name, variantId
-          });
+          console.log(`[PROCESSING] Creating draft order...`);
+          const draftResult = await createDraftOrder(offerData);
 
           if (draftResult.success) {
             console.log(`[DRAFT ORDER] Created #${draftResult.draftOrderId} (after ${delayMin}min delay)`);
+            console.log(`[SENDING EMAIL] to ${offerData.email} with invoice URL: ${draftResult.invoiceUrl}`);
 
             try {
               await sendInvoice({
-                email, product, size, offerPrice: offer, listedPrice: parseFloat(listedPrice),
-                watchers: req.body.watchers, invoiceUrl: draftResult.invoiceUrl
+                ...offerData,
+                invoiceUrl: draftResult.invoiceUrl
               });
-              console.log(`[INVOICE] Sent for ${product}`);
+              console.log(`[INVOICE] Email sent successfully for ${offerData.product}`);
             } catch (emailErr) {
               console.error(`[EMAIL ERROR] ${emailErr.message}`);
-              console.error(`[EMAIL ERROR DETAIL]`, emailErr);
+              console.error(`[EMAIL ERROR CODE]`, emailErr.code);
+              console.error(`[EMAIL ERROR RESPONSE]`, emailErr.response);
             }
 
             // Schedule expiry check (24h from invoice sent)
-            setTimeout(() => checkAndExpire(draftResult.draftOrderId, variantId), 24 * 60 * 60 * 1000);
+            setTimeout(() => checkAndExpire(draftResult.draftOrderId, offerData.variantId), 24 * 60 * 60 * 1000);
           } else {
-            console.error(`[ERROR] Delayed draft order failed:`, draftResult.error);
+            console.error(`[ERROR] Draft order failed:`, draftResult.error);
           }
         } catch (err) {
           console.error(`[ERROR] Delayed processing failed:`, err.message);
+          console.error(`[ERROR STACK]`, err.stack);
         }
       }, delayMs);
 
