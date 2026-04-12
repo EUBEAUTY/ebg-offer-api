@@ -195,16 +195,23 @@ app.post('/offer', rateLimit, async (req, res) => {
             console.log(`[DRAFT ORDER] Created #${draftResult.draftOrderId} (after ${delayMin}min delay)`);
             console.log(`[SENDING EMAIL] to ${offerData.email} with invoice URL: ${draftResult.invoiceUrl}`);
 
+            // Send Shopify's built-in invoice (reliable)
             try {
-              await sendInvoice({
+              await sendShopifyInvoice(draftResult.draftOrderId, offerData);
+              console.log(`[INVOICE] Shopify invoice sent for ${offerData.product}`);
+            } catch (invoiceErr) {
+              console.error(`[INVOICE ERROR] ${invoiceErr.message}`);
+            }
+
+            // Also try custom branded email (optional, may fail on free tier)
+            try {
+              await sendCustomEmail({
                 ...offerData,
                 invoiceUrl: draftResult.invoiceUrl
               });
-              console.log(`[INVOICE] Email sent successfully for ${offerData.product}`);
+              console.log(`[CUSTOM EMAIL] Branded email sent for ${offerData.product}`);
             } catch (emailErr) {
-              console.error(`[EMAIL ERROR] ${emailErr.message}`);
-              console.error(`[EMAIL ERROR CODE]`, emailErr.code);
-              console.error(`[EMAIL ERROR RESPONSE]`, emailErr.response);
+              console.log(`[CUSTOM EMAIL] Skipped — SMTP unavailable: ${emailErr.message}`);
             }
 
             // Schedule expiry check (24h from invoice sent)
@@ -323,7 +330,29 @@ async function createDraftOrder({ product, size, listedPrice, offerPrice, email,
 }
 
 // ── SEND BRANDED INVOICE WITH FOMO ──
-async function sendInvoice(data) {
+// ── SEND SHOPIFY'S BUILT-IN INVOICE (always works) ──
+async function sendShopifyInvoice(draftOrderId, data) {
+  const url = `https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders/${draftOrderId}/send_invoice.json`;
+  const watchers = parseInt(data.watchers) || 0;
+
+  await fetch(url, {
+    method: 'POST',
+    headers: {
+      'X-Shopify-Access-Token': SHOPIFY_TOKEN,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      draft_order_invoice: {
+        to: data.email,
+        subject: `Your offer has been accepted — ${data.product} | E.B.G. Archive`,
+        custom_message: watchers > 0 ? `${watchers} people have made offers on this item. Complete your payment within 24 hours to secure it.` : 'Complete your payment within 24 hours to secure your item.'
+      }
+    })
+  });
+}
+
+// ── SEND CUSTOM BRANDED EMAIL (optional, via SMTP) ──
+async function sendCustomEmail(data) {
   const { email, product, size, offerPrice, listedPrice, watchers, invoiceUrl } = data;
 
   const savings = (listedPrice - offerPrice).toFixed(2);
