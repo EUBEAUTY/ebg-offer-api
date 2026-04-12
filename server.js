@@ -173,7 +173,8 @@ app.post('/offer', rateLimit, async (req, res) => {
         product, size, email, name, variantId,
         listedPrice: parseFloat(listedPrice),
         offerPrice: offer,
-        watchers: req.body.watchers || '0'
+        watchers: req.body.watchers || '0',
+        productImage: req.body.productImage || ''
       };
 
       // Process in background after delay
@@ -352,7 +353,7 @@ async function sendShopifyInvoice(draftOrderId, data) {
 
 // ── SEND CUSTOM BRANDED EMAIL (optional, via SMTP) ──
 async function sendCustomEmail(data) {
-  const { email, product, size, offerPrice, listedPrice, watchers, invoiceUrl } = data;
+  const { email, product, size, offerPrice, listedPrice, watchers, invoiceUrl, productImage } = data;
 
   const savings = (listedPrice - offerPrice).toFixed(2);
   const deadline = new Date(Date.now() + 24 * 60 * 60 * 1000);
@@ -368,8 +369,14 @@ async function sendCustomEmail(data) {
   const watcherCount = parseInt(watchers) || 0;
   const watcherHtml = watcherCount > 0
     ? `<div style="text-align:center;font-size:11px;color:#888;margin-top:16px;">
-        <span style="display:inline-block;width:6px;height:6px;background:#8B0000;border-radius:50;vertical-align:middle;margin-right:4px;"></span>
+        <span style="display:inline-block;width:6px;height:6px;background:#8B0000;border-radius:50%;vertical-align:middle;margin-right:4px;"></span>
         ${watcherCount} people have made offers on this item
+      </div>`
+    : '';
+
+  const imageHtml = productImage
+    ? `<div style="text-align:center;margin-bottom:24px;">
+        <img src="${productImage}" alt="${product}" width="280" style="display:block;margin:0 auto;max-width:100%;height:auto;border:1px solid #E0E0E0;">
       </div>`
     : '';
 
@@ -390,6 +397,8 @@ async function sendCustomEmail(data) {
 
       <h1 style="font-family:'Arial Black',Arial,sans-serif;font-weight:900;font-size:22px;text-transform:uppercase;margin:0 0 6px;line-height:1.3;">${product}</h1>
       <div style="font-size:13px;color:#888;margin-bottom:24px;">Size: ${size}</div>
+
+      ${imageHtml}
 
       <hr style="border:none;border-top:1px solid #E0E0E0;margin:24px 0;">
 
@@ -429,7 +438,7 @@ async function sendCustomEmail(data) {
       <a href="https://europeanbeautygroup.com" style="color:#888;">europeanbeautygroup.com</a><br><br>
       This is a transactional email regarding your offer.<br>
       Your data is only used to process this offer — no marketing.<br><br>
-      Questions? Contact <a href="mailto:business@europeanbeautygroup.com" style="color:#888;">business@europeanbeautygroup.com</a>
+      Questions? Contact <a href="mailto:support@europeanbeautygroup.com" style="color:#888;">support@europeanbeautygroup.com</a>
     </div>
   </div>
 </body>
@@ -437,7 +446,7 @@ async function sendCustomEmail(data) {
 
   await smtpTransport.sendMail({
     from: '"European Beauty Group" <' + (process.env.SMTP_USER || 'offer@europeanbeautygroup.com') + '>',
-    replyTo: 'business@europeanbeautygroup.com',
+    replyTo: 'support@europeanbeautygroup.com',
     to: email,
     subject: `✓ Offer Accepted — ${product} for ${offerPrice}€ | E.B.G. Archive`,
     html: html
