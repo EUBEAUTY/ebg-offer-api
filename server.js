@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const nodemailer = require('nodemailer');
 
 const app = express();
 app.use(cors());
@@ -14,6 +15,17 @@ const APP_URL = process.env.APP_URL || 'https://ebg-offer-api.onrender.com';
 const PORT = process.env.PORT || 3000;
 const API_VERSION = '2024-01';
 const SCOPES = 'write_draft_orders,read_draft_orders,read_products';
+
+// ── SMTP CONFIG ──
+const smtpTransport = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || 'smtp.ionos.de',
+  port: 587,
+  secure: false,
+  auth: {
+    user: process.env.SMTP_USER || '',
+    pass: process.env.SMTP_PASS || ''
+  }
+});
 
 // ── Stored access token (persisted in memory, set via OAuth or env) ──
 let SHOPIFY_TOKEN = process.env.SHOPIFY_TOKEN || null;
@@ -135,9 +147,9 @@ app.post('/offer', async (req, res) => {
           if (draftResult.success) {
             console.log(`[DRAFT ORDER] Created #${draftResult.draftOrderId} (after ${delayMin}min delay)`);
 
-            await sendInvoice(draftResult.draftOrderId, {
+            await sendInvoice({
               email, product, size, offerPrice: offer, listedPrice: parseFloat(listedPrice),
-              watchers: req.body.watchers
+              watchers: req.body.watchers, invoiceUrl: draftResult.invoiceUrl
             });
             console.log(`[INVOICE] Sent to ${email}`);
 
@@ -256,13 +268,12 @@ async function createDraftOrder({ product, size, listedPrice, offerPrice, email,
 }
 
 // ── SEND BRANDED INVOICE WITH FOMO ──
-async function sendInvoice(draftOrderId, data) {
-  const { email, product, size, offerPrice, listedPrice } = data;
-  const url = `https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders/${draftOrderId}/send_invoice.json`;
+async function sendInvoice(data) {
+  const { email, product, size, offerPrice, listedPrice, watchers, invoiceUrl } = data;
 
   const savings = (listedPrice - offerPrice).toFixed(2);
   const deadline = new Date(Date.now() + 24 * 60 * 60 * 1000);
-  const deadlineStr = deadline.toLocaleString('de-DE', {
+  const deadlineStr = deadline.toLocaleString('en-GB', {
     timeZone: 'Europe/Berlin',
     weekday: 'long',
     day: 'numeric',
@@ -271,22 +282,82 @@ async function sendInvoice(draftOrderId, data) {
     minute: '2-digit'
   });
 
-  const watchers = parseInt(data.watchers) || 0;
-  const message = watchers > 0 ? `${watchers} people are currently watching this item` : '';
+  const watcherCount = parseInt(watchers) || 0;
+  const watcherHtml = watcherCount > 0
+    ? `<div style="text-align:center;font-size:11px;color:#888;margin-top:16px;">
+        <span style="display:inline-block;width:6px;height:6px;background:#8B0000;border-radius:50;vertical-align:middle;margin-right:4px;"></span>
+        ${watcherCount} people are currently watching this item
+      </div>`
+    : '';
 
-  await fetch(url, {
-    method: 'POST',
-    headers: {
-      'X-Shopify-Access-Token': SHOPIFY_TOKEN,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      draft_order_invoice: {
-        to: email,
-        subject: `✓ Offer Accepted — ${product} for ${offerPrice}€ | E.B.G. Archive`,
-        custom_message: message
-      }
-    })
+  const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin:0;padding:0;background:#F5F5F5;font-family:Arial,Helvetica,sans-serif;color:#1A1A1A;">
+  <div style="max-width:560px;margin:0 auto;padding:40px 20px;">
+    <div style="background:#fff;border:1.5px solid #1A1A1A;padding:36px 32px;">
+
+      <div style="font-family:'Arial Black',Arial,sans-serif;font-weight:900;font-size:14px;text-transform:uppercase;letter-spacing:0.08em;text-align:center;margin-bottom:32px;">European Beauty Group</div>
+
+      <div style="display:inline-block;background:#1A1A1A;color:#fff;font-family:'Arial Black',Arial,sans-serif;font-weight:900;font-size:10px;text-transform:uppercase;letter-spacing:0.1em;padding:6px 14px;margin-bottom:20px;">Offer Accepted</div>
+
+      <h1 style="font-family:'Arial Black',Arial,sans-serif;font-weight:900;font-size:22px;text-transform:uppercase;margin:0 0 6px;line-height:1.3;">${product}</h1>
+      <div style="font-size:13px;color:#888;margin-bottom:24px;">Size: ${size}</div>
+
+      <hr style="border:none;border-top:1px solid #E0E0E0;margin:24px 0;">
+
+      <table width="100%" cellpadding="0" cellspacing="0">
+        <tr>
+          <td style="font-size:13px;padding:6px 0;color:#888;text-decoration:line-through;">Original Price</td>
+          <td align="right" style="font-size:13px;padding:6px 0;color:#888;text-decoration:line-through;">${listedPrice.toFixed(2)}€</td>
+        </tr>
+        <tr>
+          <td style="font-size:15px;font-weight:900;padding:6px 0;">Your Offer</td>
+          <td align="right" style="font-size:15px;font-weight:900;padding:6px 0;">${offerPrice.toFixed(2)}€</td>
+        </tr>
+        <tr>
+          <td style="font-size:13px;font-weight:700;padding:6px 0;color:#8B0000;">You Save</td>
+          <td align="right" style="font-size:13px;font-weight:700;padding:6px 0;color:#8B0000;">-${savings}€</td>
+        </tr>
+      </table>
+
+      <hr style="border:none;border-top:1px solid #E0E0E0;margin:24px 0;">
+
+      <div style="background:#1A1A1A;color:#fff;padding:20px;margin:24px 0;text-align:center;">
+        <div style="font-family:'Arial Black',Arial,sans-serif;font-weight:900;font-size:14px;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px;">⚠ Pay within 24 hours</div>
+        <div style="font-size:12px;color:#AAA;">Deadline: ${deadlineStr}</div>
+        <div style="font-size:11px;color:#888;margin-top:10px;line-height:1.5;">This is a one-of-a-kind piece and is still available to other buyers.<br>Complete your payment now to secure it.</div>
+      </div>
+
+      <div style="text-align:center;margin:28px 0 8px;">
+        <a href="${invoiceUrl}" style="display:inline-block;background:#1A1A1A;color:#fff;font-family:'Arial Black',Arial,sans-serif;font-weight:900;font-size:13px;text-transform:uppercase;letter-spacing:0.04em;padding:16px 48px;text-decoration:none;border:1.5px solid #1A1A1A;">Complete Payment</a>
+      </div>
+
+      ${watcherHtml}
+
+    </div>
+
+    <div style="text-align:center;margin-top:32px;font-size:11px;color:#AAA;line-height:1.6;">
+      <strong>European Beauty Group</strong><br>
+      <a href="https://europeanbeautygroup.com" style="color:#888;">europeanbeautygroup.com</a><br><br>
+      This is a transactional email regarding your offer.<br>
+      Your data is only used to process this offer — no marketing.<br><br>
+      Questions? Contact <a href="mailto:business@europeanbeautygroup.com" style="color:#888;">business@europeanbeautygroup.com</a>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  await smtpTransport.sendMail({
+    from: '"European Beauty Group" <' + (process.env.SMTP_USER || 'noreply-offers@europeanbeautygroup.com') + '>',
+    replyTo: 'business@europeanbeautygroup.com',
+    to: email,
+    subject: `✓ Offer Accepted — ${product} for ${offerPrice}€ | E.B.G. Archive`,
+    html: html
   });
 }
 
