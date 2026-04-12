@@ -6,12 +6,14 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ── CONFIG (set these as Environment Variables in Render) ──
+// ── CONFIG ──
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE || 'european-beauty-group-2.myshopify.com';
 const SHOPIFY_TOKEN = process.env.SHOPIFY_TOKEN;
-const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL || '';
 const PORT = process.env.PORT || 3000;
 const API_VERSION = '2024-01';
+
+// ── Simple lock to prevent race conditions on same variant ──
+const processingVariants = new Set();
 
 // ── HEALTH CHECK ──
 app.get('/', (req, res) => {
@@ -31,47 +33,75 @@ app.post('/offer', async (req, res) => {
     const offer = parseFloat(offerPrice);
     const threshold = parseFloat(highestOffer);
 
-    if (offer >= threshold) {
-      // ── AUTO-ACCEPT: create draft order + send invoice ──
-      console.log(`[AUTO-ACCEPT] ${offer}€ >= ${threshold}€`);
-
-      const draftResult = await createDraftOrder({
-        product, size, listedPrice: parseFloat(listedPrice),
-        offerPrice: offer, email, name, variantId
-      });
-
-      if (draftResult.success) {
-        console.log(`[DRAFT ORDER] Created #${draftResult.draftOrderId}`);
-
-        // Send invoice
-        await sendInvoice(draftResult.draftOrderId, {
-          email, product, size, offerPrice: offer
-        });
-        console.log(`[INVOICE] Sent to ${email}`);
-
-        // Schedule expiry check (24h)
-        setTimeout(() => checkAndExpire(draftResult.draftOrderId), 24 * 60 * 60 * 1000);
-
+    // ── CHECK STOCK before doing anything ──
+    if (variantId) {
+      // Prevent race condition: if another offer for same variant is being processed
+      if (processingVariants.has(variantId)) {
+        console.log(`[RACE] Variant ${variantId} already being processed`);
         return res.json({
-          status: 'accepted',
-          message: 'Offer accepted! Check your email for the invoice.'
+          status: 'sold_out',
+          message: 'Someone else is completing a purchase for this item right now. Try again shortly.'
         });
-      } else {
-        console.error(`[ERROR] Draft order failed:`, draftResult.error);
-        return res.json({ status: 'error', message: 'Failed to process offer.' });
       }
 
-    } else {
-      // ── BELOW THRESHOLD: just log, send to contact form as fallback ──
-      console.log(`[PENDING] ${offer}€ < ${threshold}€ — needs manual review`);
+      const stock = await checkVariantStock(variantId);
+      if (stock <= 0) {
+        console.log(`[SOLD OUT] Variant ${variantId} — stock: ${stock}`);
+        return res.json({
+          status: 'sold_out',
+          message: 'Sorry, this item just sold out.'
+        });
+      }
 
-      // Send notification email via Shopify contact form
-      await sendContactForm({ product, size, listedPrice, highestOffer, offerPrice: offer, email, name, productUrl });
+      // Lock variant while processing
+      processingVariants.add(variantId);
+    }
 
-      return res.json({
-        status: 'pending',
-        message: 'Offer submitted for review.'
-      });
+    try {
+      if (offer >= threshold) {
+        // ── AUTO-ACCEPT ──
+        console.log(`[AUTO-ACCEPT] ${offer}€ >= ${threshold}€`);
+
+        const draftResult = await createDraftOrder({
+          product, size, listedPrice: parseFloat(listedPrice),
+          offerPrice: offer, email, name, variantId
+        });
+
+        if (draftResult.success) {
+          console.log(`[DRAFT ORDER] Created #${draftResult.draftOrderId}`);
+
+          // Send branded invoice with FOMO
+          await sendInvoice(draftResult.draftOrderId, {
+            email, product, size, offerPrice: offer, listedPrice: parseFloat(listedPrice)
+          });
+          console.log(`[INVOICE] Sent to ${email}`);
+
+          // Schedule expiry check (24h)
+          setTimeout(() => checkAndExpire(draftResult.draftOrderId, variantId), 24 * 60 * 60 * 1000);
+
+          return res.json({
+            status: 'accepted',
+            message: 'Offer accepted! Check your email for the invoice.'
+          });
+        } else {
+          console.error(`[ERROR] Draft order failed:`, draftResult.error);
+          return res.json({ status: 'error', message: 'Failed to process offer.' });
+        }
+
+      } else {
+        // ── BELOW THRESHOLD ──
+        console.log(`[PENDING] ${offer}€ < ${threshold}€ — needs manual review`);
+
+        await sendContactForm({ product, size, listedPrice, highestOffer, offerPrice: offer, email, name, productUrl });
+
+        return res.json({
+          status: 'pending',
+          message: 'Offer submitted for review.'
+        });
+      }
+    } finally {
+      // Release lock
+      if (variantId) processingVariants.delete(variantId);
     }
 
   } catch (err) {
@@ -79,6 +109,27 @@ app.post('/offer', async (req, res) => {
     res.status(500).json({ status: 'error', message: err.message });
   }
 });
+
+// ── CHECK VARIANT STOCK via Shopify Admin API ──
+async function checkVariantStock(variantId) {
+  try {
+    const url = `https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/variants/${variantId}.json`;
+    const response = await fetch(url, {
+      headers: { 'X-Shopify-Access-Token': SHOPIFY_TOKEN }
+    });
+    const data = await response.json();
+
+    if (data.variant) {
+      const qty = data.variant.inventory_quantity || 0;
+      console.log(`[STOCK CHECK] Variant ${variantId}: ${qty} in stock`);
+      return qty;
+    }
+    return 0;
+  } catch (err) {
+    console.error(`[STOCK CHECK ERROR]`, err.message);
+    return 0; // fail safe: treat as sold out
+  }
+}
 
 // ── CREATE DRAFT ORDER ──
 async function createDraftOrder({ product, size, listedPrice, offerPrice, email, name, variantId }) {
@@ -108,8 +159,9 @@ async function createDraftOrder({ product, size, listedPrice, offerPrice, email,
     draft_order: {
       line_items: lineItems,
       email: email,
-      note: `BINDING OFFER — Auto-accepted\nOriginal: ${listedPrice}€ → Offer: ${offerPrice}€\nCustomer: ${name}`,
-      tags: 'offer,auto-accepted'
+      note: `BINDING OFFER — Auto-accepted\nOriginal: ${listedPrice}€ → Offer: ${offerPrice}€\nCustomer: ${name}\nSize: ${size}`,
+      tags: 'offer,auto-accepted',
+      use_customer_default_address: true
     }
   };
 
@@ -138,9 +190,35 @@ async function createDraftOrder({ product, size, listedPrice, offerPrice, email,
   }
 }
 
-// ── SEND INVOICE ──
-async function sendInvoice(draftOrderId, { email, product, size, offerPrice }) {
+// ── SEND BRANDED INVOICE WITH FOMO ──
+async function sendInvoice(draftOrderId, { email, product, size, offerPrice, listedPrice }) {
   const url = `https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders/${draftOrderId}/send_invoice.json`;
+
+  const savings = (listedPrice - offerPrice).toFixed(2);
+  const deadline = new Date(Date.now() + 24 * 60 * 60 * 1000);
+  const deadlineStr = deadline.toLocaleString('de-DE', {
+    timeZone: 'Europe/Berlin',
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+
+  const message =
+    `DEIN ANGEBOT WURDE AKZEPTIERT\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `${product}\n` +
+    `Size: ${size}\n\n` +
+    `Originalpreis: ${listedPrice}€\n` +
+    `Dein Angebot: ${offerPrice}€\n` +
+    `Du sparst: ${savings}€\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `⚠️ WICHTIG: Zahle innerhalb von 24 Stunden\n` +
+    `Deadline: ${deadlineStr} Uhr\n\n` +
+    `Dieses Stück ist ein Einzelstück. Wenn du nicht innerhalb von 24 Stunden zahlst, verfällt dein Angebot und das Produkt wird wieder für andere Käufer verfügbar.\n\n` +
+    `Klicke unten auf den Link um die Zahlung abzuschließen.\n\n` +
+    `— European Beauty Group`;
 
   await fetch(url, {
     method: 'POST',
@@ -151,15 +229,15 @@ async function sendInvoice(draftOrderId, { email, product, size, offerPrice }) {
     body: JSON.stringify({
       draft_order_invoice: {
         to: email,
-        subject: 'Your offer has been accepted — E.B.G. Archive',
-        custom_message: `Your offer of ${offerPrice}€ for "${product}" (Size: ${size}) has been accepted!\n\nPlease complete your payment within 24 hours to secure your item.`
+        subject: `✓ Angebot akzeptiert — ${product} für ${offerPrice}€ | E.B.G. Archive`,
+        custom_message: message
       }
     })
   });
 }
 
 // ── CHECK & EXPIRE UNPAID DRAFT ORDERS (24h) ──
-async function checkAndExpire(draftOrderId) {
+async function checkAndExpire(draftOrderId, variantId) {
   try {
     const url = `https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders/${draftOrderId}.json`;
     const response = await fetch(url, {
@@ -168,21 +246,20 @@ async function checkAndExpire(draftOrderId) {
     const data = await response.json();
 
     if (data.draft_order && data.draft_order.status === 'open') {
-      // Not paid — delete it
       console.log(`[EXPIRED] Draft order #${draftOrderId} — not paid after 24h, deleting`);
       await fetch(url, {
         method: 'DELETE',
         headers: { 'X-Shopify-Access-Token': SHOPIFY_TOKEN }
       });
     } else {
-      console.log(`[PAID] Draft order #${draftOrderId} — status: ${data.draft_order?.status}`);
+      console.log(`[COMPLETED] Draft order #${draftOrderId} — status: ${data.draft_order?.status}`);
     }
   } catch (err) {
     console.error(`[EXPIRY CHECK ERROR] ${draftOrderId}:`, err.message);
   }
 }
 
-// ── FALLBACK: send to Shopify contact form for manual review ──
+// ── FALLBACK: Shopify contact form for manual review ──
 async function sendContactForm({ product, size, listedPrice, highestOffer, offerPrice, email, name, productUrl }) {
   try {
     const formBody = new URLSearchParams();
@@ -191,11 +268,11 @@ async function sendContactForm({ product, size, listedPrice, highestOffer, offer
     formBody.append('contact[email]', email);
     formBody.append('contact[body]',
       `BINDING OFFER (manual review)\n` +
-      `═══════════════\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
       `Product: ${product}\nSize: ${size}\n` +
       `Listed: ${listedPrice}€\nHighest Offer: ${highestOffer}€\nOffer: ${offerPrice}€\n` +
       `Customer: ${name}\nEmail: ${email}\n` +
-      `URL: ${productUrl}\n═══════════════`
+      `URL: ${productUrl}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
     );
 
     await fetch(`https://${SHOPIFY_STORE}/contact#contact_form`, {
