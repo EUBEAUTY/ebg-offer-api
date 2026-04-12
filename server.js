@@ -4,8 +4,34 @@ const fetch = require('node-fetch');
 const nodemailer = require('nodemailer');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+
+// ── CORS: only allow requests from our Shopify store ──
+app.use(cors({
+  origin: ['https://european-beauty-group-2.myshopify.com', 'https://europeanbeautygroup.com'],
+  methods: ['GET', 'POST'],
+  credentials: false
+}));
+
+app.use(express.json({ limit: '10kb' }));
+
+// ── RATE LIMITING (simple in-memory) ──
+const rateLimitMap = new Map();
+function rateLimit(req, res, next) {
+  const ip = req.headers['x-forwarded-for'] || req.ip;
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000; // 15 min
+  const maxRequests = 5;
+
+  if (!rateLimitMap.has(ip)) rateLimitMap.set(ip, []);
+  const timestamps = rateLimitMap.get(ip).filter(t => now - t < windowMs);
+  timestamps.push(now);
+  rateLimitMap.set(ip, timestamps);
+
+  if (timestamps.length > maxRequests) {
+    return res.status(429).json({ status: 'error', message: 'Too many offers. Try again later.' });
+  }
+  next();
+}
 
 // ── CONFIG ──
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE || 'european-beauty-group-2.myshopify.com';
@@ -19,8 +45,8 @@ const SCOPES = 'write_draft_orders,read_draft_orders,read_products';
 // ── SMTP CONFIG ──
 const smtpTransport = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.ionos.de',
-  port: 587,
-  secure: false,
+  port: 465,
+  secure: true,
   auth: {
     user: process.env.SMTP_USER || '',
     pass: process.env.SMTP_PASS || ''
@@ -69,8 +95,8 @@ app.get('/auth/callback', async (req, res) => {
 
     if (data.access_token) {
       SHOPIFY_TOKEN = data.access_token;
-      console.log('[AUTH] Access token obtained successfully: shpat_...' + SHOPIFY_TOKEN.slice(-6));
-      res.send('<h1>Connected!</h1><p>EBG Offer API is now connected to your Shopify store.</p><p>Token: shpat_...' + SHOPIFY_TOKEN.slice(-6) + '</p><p>Save this token as SHOPIFY_TOKEN in Render env vars: <code>' + SHOPIFY_TOKEN + '</code></p>');
+      console.log('[AUTH] Access token obtained successfully');
+      res.send('<h1>Connected!</h1><p>EBG Offer API is now connected to your Shopify store.</p><p>You can close this window.</p>');
     } else {
       console.error('[AUTH ERROR]', data);
       res.status(500).send('Failed to get access token: ' + JSON.stringify(data));
@@ -82,14 +108,28 @@ app.get('/auth/callback', async (req, res) => {
 });
 
 // ── RECEIVE OFFER ──
-app.post('/offer', async (req, res) => {
+app.post('/offer', rateLimit, async (req, res) => {
   try {
     const {
       product, size, listedPrice, highestOffer,
       offerPrice, email, name, productUrl, variantId
     } = req.body;
 
-    console.log(`[OFFER] ${product} | ${offerPrice}€ | ${name} (${email}) | Size: ${size}`);
+    // ── INPUT VALIDATION ──
+    if (!email || typeof email !== 'string' || !email.includes('@') || email.length > 254) {
+      return res.status(400).json({ status: 'error', message: 'Invalid email.' });
+    }
+    if (!name || typeof name !== 'string' || name.length > 100) {
+      return res.status(400).json({ status: 'error', message: 'Invalid name.' });
+    }
+    if (!offerPrice || isNaN(parseFloat(offerPrice)) || parseFloat(offerPrice) < 1) {
+      return res.status(400).json({ status: 'error', message: 'Invalid offer price.' });
+    }
+    if (!product || typeof product !== 'string' || product.length > 200) {
+      return res.status(400).json({ status: 'error', message: 'Invalid product.' });
+    }
+
+    console.log(`[OFFER] ${product} | ${offerPrice}€ | Size: ${size}`);
 
     const offer = parseFloat(offerPrice);
     const threshold = parseFloat(highestOffer);
@@ -151,7 +191,7 @@ app.post('/offer', async (req, res) => {
               email, product, size, offerPrice: offer, listedPrice: parseFloat(listedPrice),
               watchers: req.body.watchers, invoiceUrl: draftResult.invoiceUrl
             });
-            console.log(`[INVOICE] Sent to ${email}`);
+            console.log(`[INVOICE] Sent for ${product}`);
 
             // Schedule expiry check (24h from invoice sent)
             setTimeout(() => checkAndExpire(draftResult.draftOrderId, variantId), 24 * 60 * 60 * 1000);
