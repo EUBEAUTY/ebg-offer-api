@@ -8,16 +8,65 @@ app.use(express.json());
 
 // ── CONFIG ──
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE || 'european-beauty-group-2.myshopify.com';
-const SHOPIFY_TOKEN = process.env.SHOPIFY_TOKEN;
+const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY || '';
+const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET || '';
+const APP_URL = process.env.APP_URL || 'https://ebg-offer-api.onrender.com';
 const PORT = process.env.PORT || 3000;
 const API_VERSION = '2024-01';
+const SCOPES = 'write_draft_orders,read_draft_orders,read_products';
+
+// ── Stored access token (persisted in memory, set via OAuth or env) ──
+let SHOPIFY_TOKEN = process.env.SHOPIFY_TOKEN || null;
 
 // ── Simple lock to prevent race conditions on same variant ──
 const processingVariants = new Set();
 
 // ── HEALTH CHECK ──
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'EBG Offer API' });
+  res.json({
+    status: 'ok',
+    service: 'EBG Offer API',
+    token_set: !!SHOPIFY_TOKEN,
+    install_url: !SHOPIFY_TOKEN ? `https://${SHOPIFY_STORE}/admin/oauth/authorize?client_id=${SHOPIFY_API_KEY}&scope=${SCOPES}&redirect_uri=${APP_URL}/auth/callback` : null
+  });
+});
+
+// ── OAUTH: Start install flow ──
+app.get('/auth/install', (req, res) => {
+  const installUrl = `https://${SHOPIFY_STORE}/admin/oauth/authorize?client_id=${SHOPIFY_API_KEY}&scope=${SCOPES}&redirect_uri=${APP_URL}/auth/callback`;
+  res.redirect(installUrl);
+});
+
+// ── OAUTH: Callback — exchange code for token ──
+app.get('/auth/callback', async (req, res) => {
+  const { code } = req.query;
+  if (!code) return res.status(400).send('Missing code parameter');
+
+  try {
+    const response = await fetch(`https://${SHOPIFY_STORE}/admin/oauth/access_token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_id: SHOPIFY_API_KEY,
+        client_secret: SHOPIFY_API_SECRET,
+        code: code
+      })
+    });
+
+    const data = await response.json();
+
+    if (data.access_token) {
+      SHOPIFY_TOKEN = data.access_token;
+      console.log('[AUTH] Access token obtained successfully: shpat_...' + SHOPIFY_TOKEN.slice(-6));
+      res.send('<h1>Connected!</h1><p>EBG Offer API is now connected to your Shopify store.</p><p>Token: shpat_...' + SHOPIFY_TOKEN.slice(-6) + '</p><p>Save this token as SHOPIFY_TOKEN in Render env vars: <code>' + SHOPIFY_TOKEN + '</code></p>');
+    } else {
+      console.error('[AUTH ERROR]', data);
+      res.status(500).send('Failed to get access token: ' + JSON.stringify(data));
+    }
+  } catch (err) {
+    console.error('[AUTH ERROR]', err);
+    res.status(500).send('Auth error: ' + err.message);
+  }
 });
 
 // ── RECEIVE OFFER ──
