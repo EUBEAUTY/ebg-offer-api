@@ -123,8 +123,8 @@ app.post('/offer', async (req, res) => {
 
     if (offer >= threshold) {
       // ── AUTO-ACCEPT: delay 1-120 minutes for realism ──
-      const delayMin = Math.floor(Math.random() * 120) + 1;
-      const delayMs = delayMin * 60 * 1000;
+      const delayMin = 0; // TESTING: set back to Math.floor(Math.random() * 120) + 1
+      const delayMs = 5000; // TESTING: 5 seconds instead of random delay
       console.log(`[AUTO-ACCEPT] ${offer}€ >= ${threshold}€ — will process in ${delayMin} minutes`);
 
       // Process in background after random delay
