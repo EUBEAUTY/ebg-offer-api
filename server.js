@@ -106,52 +106,67 @@ app.post('/offer', async (req, res) => {
       processingVariants.add(variantId);
     }
 
-    try {
-      if (offer >= threshold) {
-        // ── AUTO-ACCEPT ──
-        console.log(`[AUTO-ACCEPT] ${offer}€ >= ${threshold}€`);
+    // Release lock immediately — we'll process async
+    if (variantId) processingVariants.delete(variantId);
 
-        const draftResult = await createDraftOrder({
-          product, size, listedPrice: parseFloat(listedPrice),
-          offerPrice: offer, email, name, variantId
-        });
+    if (offer >= threshold) {
+      // ── AUTO-ACCEPT: delay 1-120 minutes for realism ──
+      const delayMin = Math.floor(Math.random() * 120) + 1;
+      const delayMs = delayMin * 60 * 1000;
+      console.log(`[AUTO-ACCEPT] ${offer}€ >= ${threshold}€ — will process in ${delayMin} minutes`);
 
-        if (draftResult.success) {
-          console.log(`[DRAFT ORDER] Created #${draftResult.draftOrderId}`);
+      // Process in background after random delay
+      setTimeout(async () => {
+        try {
+          // Re-check stock before creating draft order
+          if (variantId) {
+            const stock = await checkVariantStock(variantId);
+            if (stock <= 0) {
+              console.log(`[EXPIRED] Variant ${variantId} sold out before delayed accept`);
+              return;
+            }
+          }
 
-          // Send branded invoice with FOMO
-          await sendInvoice(draftResult.draftOrderId, {
-            email, product, size, offerPrice: offer, listedPrice: parseFloat(listedPrice),
-            watchers: req.body.watchers
+          const draftResult = await createDraftOrder({
+            product, size, listedPrice: parseFloat(listedPrice),
+            offerPrice: offer, email, name, variantId
           });
-          console.log(`[INVOICE] Sent to ${email}`);
 
-          // Schedule expiry check (24h)
-          setTimeout(() => checkAndExpire(draftResult.draftOrderId, variantId), 24 * 60 * 60 * 1000);
+          if (draftResult.success) {
+            console.log(`[DRAFT ORDER] Created #${draftResult.draftOrderId} (after ${delayMin}min delay)`);
 
-          return res.json({
-            status: 'accepted',
-            message: 'Offer accepted! Check your email for the invoice.'
-          });
-        } else {
-          console.error(`[ERROR] Draft order failed:`, draftResult.error);
-          return res.json({ status: 'error', message: 'Failed to process offer.' });
+            await sendInvoice(draftResult.draftOrderId, {
+              email, product, size, offerPrice: offer, listedPrice: parseFloat(listedPrice),
+              watchers: req.body.watchers
+            });
+            console.log(`[INVOICE] Sent to ${email}`);
+
+            // Schedule expiry check (24h from invoice sent)
+            setTimeout(() => checkAndExpire(draftResult.draftOrderId, variantId), 24 * 60 * 60 * 1000);
+          } else {
+            console.error(`[ERROR] Delayed draft order failed:`, draftResult.error);
+          }
+        } catch (err) {
+          console.error(`[ERROR] Delayed processing failed:`, err.message);
         }
+      }, delayMs);
 
-      } else {
-        // ── BELOW THRESHOLD ──
-        console.log(`[PENDING] ${offer}€ < ${threshold}€ — needs manual review`);
+      // Respond immediately to customer
+      return res.json({
+        status: 'submitted',
+        message: 'Offer submitted for review.'
+      });
 
-        await sendContactForm({ product, size, listedPrice, highestOffer, offerPrice: offer, email, name, productUrl });
+    } else {
+      // ── BELOW THRESHOLD: notify for manual review ──
+      console.log(`[PENDING] ${offer}€ < ${threshold}€ — needs manual review`);
 
-        return res.json({
-          status: 'pending',
-          message: 'Offer submitted for review.'
-        });
-      }
-    } finally {
-      // Release lock
-      if (variantId) processingVariants.delete(variantId);
+      await sendContactForm({ product, size, listedPrice, highestOffer, offerPrice: offer, email, name, productUrl });
+
+      return res.json({
+        status: 'submitted',
+        message: 'Offer submitted for review.'
+      });
     }
 
   } catch (err) {
