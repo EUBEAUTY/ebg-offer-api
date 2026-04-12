@@ -286,7 +286,7 @@ async function sendInvoice(data) {
   const watcherHtml = watcherCount > 0
     ? `<div style="text-align:center;font-size:11px;color:#888;margin-top:16px;">
         <span style="display:inline-block;width:6px;height:6px;background:#8B0000;border-radius:50;vertical-align:middle;margin-right:4px;"></span>
-        ${watcherCount} people are currently watching this item
+        ${watcherCount} people have made offers on this item
       </div>`
     : '';
 
