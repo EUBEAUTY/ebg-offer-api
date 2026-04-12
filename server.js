@@ -353,7 +353,7 @@ async function sendInvoice(data) {
 </html>`;
 
   await smtpTransport.sendMail({
-    from: '"European Beauty Group" <' + (process.env.SMTP_USER || 'noreply-offers@europeanbeautygroup.com') + '>',
+    from: '"European Beauty Group" <' + (process.env.SMTP_USER || 'offer@europeanbeautygroup.com') + '>',
     replyTo: 'business@europeanbeautygroup.com',
     to: email,
     subject: `✓ Offer Accepted — ${product} for ${offerPrice}€ | E.B.G. Archive`,
