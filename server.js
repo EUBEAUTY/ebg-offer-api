@@ -112,9 +112,12 @@ app.get('/auth/callback', async (req, res) => {
 app.post('/offer', rateLimit, async (req, res) => {
   try {
     const {
-      product, size, listedPrice, highestOffer,
+      product, size, listedPrice, minimumOffer, highestOffer,
       offerPrice, email, name, productUrl, variantId
     } = req.body;
+
+    // Support both old (highestOffer) and new (minimumOffer) field names
+    const offerThreshold = minimumOffer || highestOffer;
 
     // ── INPUT VALIDATION ──
     if (!email || typeof email !== 'string' || !email.includes('@') || email.length > 254) {
@@ -133,7 +136,7 @@ app.post('/offer', rateLimit, async (req, res) => {
     console.log(`[OFFER] ${product} | ${offerPrice}€ | Size: ${size}`);
 
     const offer = parseFloat(offerPrice);
-    const threshold = parseFloat(highestOffer);
+    const threshold = parseFloat(offerThreshold);
 
     // ── CHECK STOCK before doing anything ──
     if (variantId) {
@@ -173,7 +176,6 @@ app.post('/offer', rateLimit, async (req, res) => {
         product, size, email, name, variantId,
         listedPrice: parseFloat(listedPrice),
         offerPrice: offer,
-        watchers: req.body.watchers || '0',
         productImage: req.body.productImage || ''
       };
 
@@ -235,7 +237,7 @@ app.post('/offer', rateLimit, async (req, res) => {
       // ── BELOW THRESHOLD: notify for manual review ──
       console.log(`[PENDING] ${offer}€ < ${threshold}€ — needs manual review`);
 
-      await sendContactForm({ product, size, listedPrice, highestOffer, offerPrice: offer, email, name, productUrl });
+      await sendContactForm({ product, size, listedPrice, offerPrice: offer, email, name, productUrl });
 
       return res.json({
         status: 'submitted',
@@ -333,7 +335,6 @@ async function createDraftOrder({ product, size, listedPrice, offerPrice, email,
 // ── SEND SHOPIFY'S BUILT-IN INVOICE (always works) ──
 async function sendShopifyInvoice(draftOrderId, data) {
   const url = `https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders/${draftOrderId}/send_invoice.json`;
-  const watchers = parseInt(data.watchers) || 0;
 
   await fetch(url, {
     method: 'POST',
@@ -345,7 +346,7 @@ async function sendShopifyInvoice(draftOrderId, data) {
       draft_order_invoice: {
         to: data.email,
         subject: `Your offer has been accepted — ${data.product} | E.B.G. Archive`,
-        custom_message: watchers > 0 ? `${watchers} people have made offers on this item. Complete your payment within 24 hours to secure it.` : 'Complete your payment within 24 hours to secure your item.'
+        custom_message: 'Complete your payment within 24 hours to secure your item.'
       }
     })
   });
@@ -353,7 +354,7 @@ async function sendShopifyInvoice(draftOrderId, data) {
 
 // ── SEND CUSTOM BRANDED EMAIL (optional, via SMTP) ──
 async function sendCustomEmail(data) {
-  const { email, product, size, offerPrice, listedPrice, watchers, invoiceUrl, productImage } = data;
+  const { email, product, size, offerPrice, listedPrice, invoiceUrl, productImage } = data;
 
   const savings = (listedPrice - offerPrice).toFixed(2);
   const deadline = new Date(Date.now() + 24 * 60 * 60 * 1000);
@@ -365,14 +366,6 @@ async function sendCustomEmail(data) {
     hour: '2-digit',
     minute: '2-digit'
   });
-
-  const watcherCount = parseInt(watchers) || 0;
-  const watcherHtml = watcherCount > 0
-    ? `<div style="text-align:center;font-size:11px;color:#888;margin-top:16px;">
-        <span style="display:inline-block;width:6px;height:6px;background:#8B0000;border-radius:50%;vertical-align:middle;margin-right:4px;"></span>
-        ${watcherCount} people have made offers on this item
-      </div>`
-    : '';
 
   const imageHtml = productImage
     ? `<div style="text-align:center;margin-bottom:24px;">
@@ -429,7 +422,6 @@ async function sendCustomEmail(data) {
         <a href="${invoiceUrl}" style="display:inline-block;background:#1A1A1A;color:#fff;font-family:'Arial Black',Arial,sans-serif;font-weight:900;font-size:13px;text-transform:uppercase;letter-spacing:0.04em;padding:16px 48px;text-decoration:none;border:1.5px solid #1A1A1A;">Complete Payment</a>
       </div>
 
-      ${watcherHtml}
 
     </div>
 
@@ -477,7 +469,7 @@ async function checkAndExpire(draftOrderId, variantId) {
 }
 
 // ── FALLBACK: Shopify contact form for manual review ──
-async function sendContactForm({ product, size, listedPrice, highestOffer, offerPrice, email, name, productUrl }) {
+async function sendContactForm({ product, size, listedPrice, offerPrice, email, name, productUrl }) {
   try {
     const formBody = new URLSearchParams();
     formBody.append('form_type', 'contact');
@@ -487,7 +479,7 @@ async function sendContactForm({ product, size, listedPrice, highestOffer, offer
       `BINDING OFFER (manual review)\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
       `Product: ${product}\nSize: ${size}\n` +
-      `Listed: ${listedPrice}€\nHighest Offer: ${highestOffer}€\nOffer: ${offerPrice}€\n` +
+      `Listed: ${listedPrice}€\nOffer: ${offerPrice}€\n` +
       `Customer: ${name}\nEmail: ${email}\n` +
       `URL: ${productUrl}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━`
     );
