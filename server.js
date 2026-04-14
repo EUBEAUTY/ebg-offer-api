@@ -40,7 +40,7 @@ const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET || '';
 const APP_URL = process.env.APP_URL || 'https://ebg-offer-api.onrender.com';
 const PORT = process.env.PORT || 3000;
 const API_VERSION = '2024-01';
-const SCOPES = 'write_draft_orders,read_draft_orders,read_products';
+const SCOPES = 'write_draft_orders,read_draft_orders,read_products,write_customers,read_customers';
 
 // ── SMTP CONFIG ──
 const smtpTransport = nodemailer.createTransport({
