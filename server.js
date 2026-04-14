@@ -119,44 +119,44 @@ app.post('/signup', rateLimit, async (req, res) => {
 
     console.log(`[SIGNUP] ${email}`);
 
-    // Create customer via Shopify Admin API
-    const customerRes = await fetch(`https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/customers.json`, {
-      method: 'POST',
-      headers: {
-        'X-Shopify-Access-Token': SHOPIFY_TOKEN,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        customer: {
-          email: email,
-          tags: 'early-access,pre-launch',
-          accepts_marketing: true,
-          marketing_opt_in_level: 'single_opt_in'
-        }
-      })
-    });
-
-    const customerData = await customerRes.json();
-
-    if (customerData.errors) {
-      // Customer likely already exists
-      if (JSON.stringify(customerData.errors).includes('has already been taken')) {
-        console.log(`[SIGNUP] ${email} already exists`);
-        return res.json({ status: 'exists', message: 'Already signed up.' });
-      }
-      console.error(`[SIGNUP ERROR]`, JSON.stringify(customerData.errors));
-      return res.status(400).json({ status: 'error', message: 'Could not sign up.', detail: customerData.errors });
-    }
-
-    console.log(`[SIGNUP] Customer created: ${customerData.customer?.id}`);
-
-    // Send branded double opt-in email
+    // Create customer via $0 draft order (write_draft_orders scope already granted)
     try {
-      await sendSignupEmail(email);
-      console.log(`[SIGNUP EMAIL] Sent to ${email}`);
-    } catch (emailErr) {
-      console.error(`[SIGNUP EMAIL ERROR] ${emailErr.message}`);
+      const draftRes = await fetch(`https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders.json`, {
+        method: 'POST',
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          draft_order: {
+            line_items: [{ title: 'Early Access Raffle Entry', price: '0.00', quantity: 1 }],
+            email: email,
+            tags: 'early-access,pre-launch,raffle',
+            note: 'Auto-created from early access raffle signup on password page.'
+          }
+        })
+      });
+
+      const draftData = await draftRes.json();
+
+      if (draftData.draft_order) {
+        console.log(`[SIGNUP] Draft order created: #${draftData.draft_order.id} for ${email}`);
+        // Complete and delete the draft so it doesn't clutter orders
+        await fetch(`https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders/${draftData.draft_order.id}.json`, {
+          method: 'DELETE',
+          headers: { 'X-Shopify-Access-Token': SHOPIFY_TOKEN }
+        });
+        console.log(`[SIGNUP] Draft order cleaned up`);
+      } else {
+        console.error(`[SIGNUP] Draft order failed:`, JSON.stringify(draftData));
+      }
+    } catch (draftErr) {
+      console.error(`[SIGNUP DRAFT ERROR] ${draftErr.message}`);
     }
+
+    // Send branded raffle confirmation email
+    await sendSignupEmail(email);
+    console.log(`[SIGNUP EMAIL] Sent to ${email}`);
 
     return res.json({ status: 'ok', message: 'Signed up.' });
 
