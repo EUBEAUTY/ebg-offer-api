@@ -108,6 +108,107 @@ app.get('/auth/callback', async (req, res) => {
   }
 });
 
+// ── EARLY ACCESS SIGNUP ──
+app.post('/signup', rateLimit, async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email || typeof email !== 'string' || !email.includes('@') || email.length > 254) {
+      return res.status(400).json({ status: 'error', message: 'Invalid email.' });
+    }
+
+    console.log(`[SIGNUP] ${email}`);
+
+    // Create customer via Shopify Admin API
+    const customerRes = await fetch(`https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/customers.json`, {
+      method: 'POST',
+      headers: {
+        'X-Shopify-Access-Token': SHOPIFY_TOKEN,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        customer: {
+          email: email,
+          tags: 'early-access,pre-launch',
+          accepts_marketing: true,
+          marketing_opt_in_level: 'single_opt_in'
+        }
+      })
+    });
+
+    const customerData = await customerRes.json();
+
+    if (customerData.errors) {
+      // Customer likely already exists
+      if (JSON.stringify(customerData.errors).includes('has already been taken')) {
+        console.log(`[SIGNUP] ${email} already exists`);
+        return res.json({ status: 'exists', message: 'Already signed up.' });
+      }
+      console.error(`[SIGNUP ERROR]`, customerData.errors);
+      return res.status(400).json({ status: 'error', message: 'Could not sign up.' });
+    }
+
+    console.log(`[SIGNUP] Customer created: ${customerData.customer?.id}`);
+
+    // Send branded double opt-in email
+    try {
+      await sendSignupEmail(email);
+      console.log(`[SIGNUP EMAIL] Sent to ${email}`);
+    } catch (emailErr) {
+      console.error(`[SIGNUP EMAIL ERROR] ${emailErr.message}`);
+    }
+
+    return res.json({ status: 'ok', message: 'Signed up.' });
+
+  } catch (err) {
+    console.error('[SIGNUP ERROR]', err.message);
+    res.status(500).json({ status: 'error', message: 'Server error.' });
+  }
+});
+
+// ── SEND SIGNUP CONFIRMATION EMAIL ──
+async function sendSignupEmail(email) {
+  const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#F5F5F5;font-family:Arial,Helvetica,sans-serif;color:#1A1A1A;">
+  <div style="max-width:560px;margin:0 auto;padding:40px 20px;">
+    <div style="background:#fff;border:1.5px solid #1A1A1A;padding:36px 32px;">
+      <div style="font-family:'Arial Black',Arial,sans-serif;font-weight:900;font-size:14px;text-transform:uppercase;letter-spacing:0.08em;text-align:center;margin-bottom:32px;">European Beauty Group</div>
+      <div style="text-align:center;margin-bottom:24px;">
+        <span style="display:inline-block;background:#1A1A1A;color:#fff;font-family:'Arial Black',Arial,sans-serif;font-weight:900;font-size:10px;text-transform:uppercase;letter-spacing:0.1em;padding:6px 14px;">Early Access Raffle</span>
+      </div>
+      <h1 style="font-family:'Arial Black',Arial,sans-serif;font-weight:900;font-size:28px;text-transform:uppercase;margin:0 0 16px;line-height:1.2;text-align:center;">You're In.</h1>
+      <hr style="border:none;border-top:1px solid #E0E0E0;margin:24px 0;">
+      <p style="font-size:14px;line-height:1.7;margin:0 0 16px;text-align:center;">Your email has been entered into the early access raffle.</p>
+      <p style="font-size:14px;line-height:1.7;margin:0 0 16px;text-align:center;">If selected, you'll receive access to the store before anyone else.</p>
+      <p style="font-size:14px;line-height:1.7;margin:0 0 24px;text-align:center;color:#888;">No action needed — we'll reach out if you're chosen.</p>
+      <hr style="border:none;border-top:1px solid #E0E0E0;margin:24px 0;">
+      <div style="text-align:center;margin-top:24px;">
+        <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.1em;color:#888;margin-bottom:12px;">Join the community</div>
+        <a href="https://discord.gg/wuuvJQsZWX" style="display:inline-block;font-family:'Arial Black',Arial,sans-serif;font-weight:900;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#1A1A1A;text-decoration:none;border:1.5px solid #1A1A1A;padding:10px 24px;margin:0 4px;">Discord</a>
+        <a href="https://whatsapp.com/channel/0029Va7nWXUIN9igXy92KH3T" style="display:inline-block;font-family:'Arial Black',Arial,sans-serif;font-weight:900;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#1A1A1A;text-decoration:none;border:1.5px solid #1A1A1A;padding:10px 24px;margin:0 4px;">WhatsApp</a>
+      </div>
+    </div>
+    <div style="text-align:center;margin-top:32px;font-size:11px;color:#AAA;line-height:1.6;">
+      <strong>European Beauty Group</strong><br>
+      <a href="https://europeanbeautygroup.com" style="color:#888;">europeanbeautygroup.com</a><br><br>
+      You received this because you signed up for the early access raffle.
+    </div>
+  </div>
+</body>
+</html>`;
+
+  await smtpTransport.sendMail({
+    from: '"European Beauty Group" <' + (process.env.SMTP_USER || 'offer@europeanbeautygroup.com') + '>',
+    replyTo: 'support@europeanbeautygroup.com',
+    to: email,
+    subject: "You're in the raffle — E.B.G.",
+    html: html
+  });
+}
+
 // ── RECEIVE OFFER ──
 app.post('/offer', rateLimit, async (req, res) => {
   try {
