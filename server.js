@@ -144,8 +144,8 @@ app.post('/signup', rateLimit, async (req, res) => {
         console.log(`[SIGNUP] ${email} already exists`);
         return res.json({ status: 'exists', message: 'Already signed up.' });
       }
-      console.error(`[SIGNUP ERROR]`, customerData.errors);
-      return res.status(400).json({ status: 'error', message: 'Could not sign up.' });
+      console.error(`[SIGNUP ERROR]`, JSON.stringify(customerData.errors));
+      return res.status(400).json({ status: 'error', message: 'Could not sign up.', detail: customerData.errors });
     }
 
     console.log(`[SIGNUP] Customer created: ${customerData.customer?.id}`);
