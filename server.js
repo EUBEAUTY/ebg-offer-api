@@ -112,7 +112,7 @@ app.get('/auth/callback', async (req, res) => {
 });
 
 // ── EARLY ACCESS SIGNUP ──
-// Creates customer via draft order, Shopify's built-in double opt-in sends the confirmation email
+// Creates customer via Shopify Admin API → Shopify sends double opt-in email automatically
 app.post('/signup', rateLimit, async (req, res) => {
   try {
     const { email } = req.body;
@@ -123,38 +123,39 @@ app.post('/signup', rateLimit, async (req, res) => {
 
     console.log(`[SIGNUP] ${email}`);
 
-    // Create customer via $0 draft order (uses existing write_draft_orders scope)
-    const draftRes = await fetch(`https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders.json`, {
+    const customerRes = await fetch(`https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/customers.json`, {
       method: 'POST',
       headers: {
         'X-Shopify-Access-Token': SHOPIFY_TOKEN,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        draft_order: {
-          line_items: [{ title: 'Early Access Raffle Entry', price: '0.00', quantity: 1 }],
+        customer: {
           email: email,
           tags: 'early-access,pre-launch,raffle',
-          note: 'Early access raffle signup from password page.'
+          accepts_marketing: true,
+          email_marketing_consent: {
+            state: 'pending',
+            opt_in_level: 'confirmed_opt_in'
+          }
         }
       })
     });
 
-    const draftData = await draftRes.json();
+    const data = await customerRes.json();
 
-    if (draftData.draft_order) {
-      console.log(`[SIGNUP] Customer created via draft #${draftData.draft_order.id} for ${email}`);
-      // Delete the draft — customer record stays in Shopify
-      await fetch(`https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders/${draftData.draft_order.id}.json`, {
-        method: 'DELETE',
-        headers: { 'X-Shopify-Access-Token': SHOPIFY_TOKEN }
-      });
-      console.log(`[SIGNUP] Draft cleaned up — Shopify will send double opt-in email`);
+    if (data.customer) {
+      console.log(`[SIGNUP] Customer created: ${data.customer.id} — Shopify sends double opt-in`);
       return res.json({ status: 'ok', message: 'Signed up.' });
-    } else {
-      console.error(`[SIGNUP ERROR]`, JSON.stringify(draftData));
-      return res.status(400).json({ status: 'error', message: 'Could not sign up.' });
     }
+
+    if (data.errors && JSON.stringify(data.errors).includes('has already been taken')) {
+      console.log(`[SIGNUP] ${email} already exists`);
+      return res.json({ status: 'ok', message: 'Already signed up.' });
+    }
+
+    console.error(`[SIGNUP ERROR]`, JSON.stringify(data.errors || data));
+    return res.status(400).json({ status: 'error', message: 'Could not sign up.' });
 
   } catch (err) {
     console.error('[SIGNUP ERROR]', err.message);
