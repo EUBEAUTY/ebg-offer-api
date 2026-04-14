@@ -177,8 +177,15 @@ app.post('/offer', rateLimit, async (req, res) => {
     // Release lock immediately — we'll process async
     if (variantId) processingVariants.delete(variantId);
 
-    // ── ACCEPT: process immediately (no delay — Render free tier kills setTimeout) ──
-    console.log(`[ACCEPTED] ${offer}€ >= ${threshold}€ — processing now`);
+    // ── ACCEPT: delay 2-120 min to simulate human review ──
+    const delayMin = Math.floor(Math.random() * 119) + 2;
+    const delayMs = delayMin * 60 * 1000;
+    console.log(`[ACCEPTED] ${offer}€ >= ${threshold}€ — will send invoice in ${delayMin} min`);
+
+    // Keep Render awake until the delayed email fires (pings every 10 min)
+    const keepAlive = setInterval(() => {
+      fetch(`${APP_URL}/`).catch(() => {});
+    }, 10 * 60 * 1000);
 
     const offerData = {
       product, size, email, name, variantId,
@@ -187,37 +194,47 @@ app.post('/offer', rateLimit, async (req, res) => {
       productImage: req.body.productImage || ''
     };
 
-    const draftResult = await createDraftOrder(offerData);
+    // Respond immediately to customer
+    res.json({ status: 'submitted', message: 'Offer submitted for review.' });
 
-    if (draftResult.success) {
-      console.log(`[DRAFT ORDER] Created #${draftResult.draftOrderId}`);
-      console.log(`[SENDING EMAIL] to ${email} with invoice URL: ${draftResult.invoiceUrl}`);
-
-      // Send custom branded email
+    // Process in background after delay
+    setTimeout(async () => {
       try {
-        await sendCustomEmail({
-          ...offerData,
-          invoiceUrl: draftResult.invoiceUrl
-        });
-        console.log(`[EMAIL] Branded email sent for ${product}`);
-      } catch (emailErr) {
-        console.error(`[EMAIL ERROR] ${emailErr.message}`);
-        // Fallback to Shopify invoice if custom email fails
-        try {
-          await sendShopifyInvoice(draftResult.draftOrderId, offerData);
-          console.log(`[FALLBACK] Shopify invoice sent for ${product}`);
-        } catch (fallbackErr) {
-          console.error(`[FALLBACK ERROR] ${fallbackErr.message}`);
+        // Re-check stock before creating draft order
+        if (offerData.variantId) {
+          const stock = await checkVariantStock(offerData.variantId);
+          if (stock <= 0) {
+            console.log(`[EXPIRED] Variant ${offerData.variantId} sold out before delayed accept`);
+            return;
+          }
         }
-      }
-    } else {
-      console.error(`[ERROR] Draft order failed:`, draftResult.error);
-    }
 
-    return res.json({
-      status: 'submitted',
-      message: 'Offer submitted for review.'
-    });
+        const draftResult = await createDraftOrder(offerData);
+
+        if (draftResult.success) {
+          console.log(`[DRAFT ORDER] Created #${draftResult.draftOrderId} (after ${delayMin}min delay)`);
+
+          try {
+            await sendCustomEmail({ ...offerData, invoiceUrl: draftResult.invoiceUrl });
+            console.log(`[EMAIL] Branded email sent for ${offerData.product}`);
+          } catch (emailErr) {
+            console.error(`[EMAIL ERROR] ${emailErr.message}`);
+            try {
+              await sendShopifyInvoice(draftResult.draftOrderId, offerData);
+              console.log(`[FALLBACK] Shopify invoice sent for ${offerData.product}`);
+            } catch (fallbackErr) {
+              console.error(`[FALLBACK ERROR] ${fallbackErr.message}`);
+            }
+          }
+        } else {
+          console.error(`[ERROR] Draft order failed:`, draftResult.error);
+        }
+      } catch (err) {
+        console.error(`[ERROR] Delayed processing failed:`, err.message);
+      } finally {
+        clearInterval(keepAlive);
+      }
+    }, delayMs);
 
   } catch (err) {
     console.error('[ERROR]', err);
