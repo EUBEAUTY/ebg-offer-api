@@ -60,6 +60,9 @@ let SHOPIFY_TOKEN = process.env.SHOPIFY_TOKEN || null;
 // ── Simple lock to prevent race conditions on same variant ──
 const processingVariants = new Set();
 
+// ── Pending signups (email → token) for double opt-in ──
+const pendingSignups = new Map();
+
 // ── HEALTH CHECK ──
 app.get('/', (req, res) => {
   res.json({
@@ -108,7 +111,7 @@ app.get('/auth/callback', async (req, res) => {
   }
 });
 
-// ── EARLY ACCESS SIGNUP ──
+// ── EARLY ACCESS SIGNUP (Step 1: send double opt-in email) ──
 app.post('/signup', rateLimit, async (req, res) => {
   try {
     const { email } = req.body;
@@ -117,48 +120,18 @@ app.post('/signup', rateLimit, async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'Invalid email.' });
     }
 
-    console.log(`[SIGNUP] ${email}`);
+    // Generate a simple token for confirmation
+    const token = Buffer.from(email + ':' + Date.now() + ':' + Math.random()).toString('base64url');
+    pendingSignups.set(token, { email, created: Date.now() });
 
-    // Create customer via $0 draft order (write_draft_orders scope already granted)
-    try {
-      const draftRes = await fetch(`https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders.json`, {
-        method: 'POST',
-        headers: {
-          'X-Shopify-Access-Token': SHOPIFY_TOKEN,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          draft_order: {
-            line_items: [{ title: 'Early Access Raffle Entry', price: '0.00', quantity: 1 }],
-            email: email,
-            tags: 'early-access,pre-launch,raffle',
-            note: 'Auto-created from early access raffle signup on password page.'
-          }
-        })
-      });
+    console.log(`[SIGNUP] ${email} — confirmation pending`);
 
-      const draftData = await draftRes.json();
+    // Send double opt-in email with confirm link
+    const confirmUrl = `${APP_URL}/signup/confirm?token=${token}`;
+    await sendDoubleOptInEmail(email, confirmUrl);
+    console.log(`[SIGNUP] Double opt-in email sent to ${email}`);
 
-      if (draftData.draft_order) {
-        console.log(`[SIGNUP] Draft order created: #${draftData.draft_order.id} for ${email}`);
-        // Complete and delete the draft so it doesn't clutter orders
-        await fetch(`https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders/${draftData.draft_order.id}.json`, {
-          method: 'DELETE',
-          headers: { 'X-Shopify-Access-Token': SHOPIFY_TOKEN }
-        });
-        console.log(`[SIGNUP] Draft order cleaned up`);
-      } else {
-        console.error(`[SIGNUP] Draft order failed:`, JSON.stringify(draftData));
-      }
-    } catch (draftErr) {
-      console.error(`[SIGNUP DRAFT ERROR] ${draftErr.message}`);
-    }
-
-    // Send branded raffle confirmation email
-    await sendSignupEmail(email);
-    console.log(`[SIGNUP EMAIL] Sent to ${email}`);
-
-    return res.json({ status: 'ok', message: 'Signed up.' });
+    return res.json({ status: 'ok', message: 'Confirmation email sent.' });
 
   } catch (err) {
     console.error('[SIGNUP ERROR]', err.message);
@@ -166,7 +139,110 @@ app.post('/signup', rateLimit, async (req, res) => {
   }
 });
 
-// ── SEND SIGNUP CONFIRMATION EMAIL ──
+// ── EARLY ACCESS CONFIRM (Step 2: user clicks confirm link) ──
+app.get('/signup/confirm', async (req, res) => {
+  const { token } = req.query;
+  const pending = pendingSignups.get(token);
+
+  if (!pending) {
+    return res.send('<html><body style="margin:0;padding:60px 20px;background:#F5F5F5;font-family:Arial,sans-serif;text-align:center;"><div style="max-width:460px;margin:0 auto;background:#fff;border:1.5px solid #1A1A1A;padding:36px 32px;"><h1 style="font-family:Arial Black,Arial,sans-serif;font-size:22px;text-transform:uppercase;">Link Expired</h1><p style="color:#888;font-size:14px;">This confirmation link is no longer valid. Please sign up again.</p></div></body></html>');
+  }
+
+  const { email } = pending;
+  pendingSignups.delete(token);
+
+  console.log(`[CONFIRMED] ${email} — creating customer`);
+
+  // Create customer via $0 draft order (uses existing write_draft_orders scope)
+  try {
+    const draftRes = await fetch(`https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders.json`, {
+      method: 'POST',
+      headers: {
+        'X-Shopify-Access-Token': SHOPIFY_TOKEN,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        draft_order: {
+          line_items: [{ title: 'Early Access Raffle Entry', price: '0.00', quantity: 1 }],
+          email: email,
+          tags: 'early-access,pre-launch,raffle',
+          note: 'Confirmed double opt-in from early access raffle.'
+        }
+      })
+    });
+
+    const draftData = await draftRes.json();
+
+    if (draftData.draft_order) {
+      console.log(`[CONFIRMED] Customer created via draft #${draftData.draft_order.id}`);
+      // Delete the draft order — customer record stays
+      await fetch(`https://${SHOPIFY_STORE}/admin/api/${API_VERSION}/draft_orders/${draftData.draft_order.id}.json`, {
+        method: 'DELETE',
+        headers: { 'X-Shopify-Access-Token': SHOPIFY_TOKEN }
+      });
+    }
+  } catch (err) {
+    console.error(`[CONFIRM ERROR] ${err.message}`);
+  }
+
+  // Send the "You're In" confirmation email
+  try {
+    await sendSignupEmail(email);
+    console.log(`[CONFIRMED] Raffle confirmation email sent to ${email}`);
+  } catch (err) {
+    console.error(`[CONFIRM EMAIL ERROR] ${err.message}`);
+  }
+
+  // Show branded confirmation page
+  res.send(`<html><body style="margin:0;padding:60px 20px;background:#F5F5F5;font-family:Arial,sans-serif;text-align:center;">
+    <div style="max-width:460px;margin:0 auto;background:#fff;border:1.5px solid #1A1A1A;padding:36px 32px;">
+      <div style="font-family:Arial Black,Arial,sans-serif;font-weight:900;font-size:14px;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:24px;">European Beauty Group</div>
+      <div style="display:inline-block;background:#1A1A1A;color:#fff;font-family:Arial Black,Arial,sans-serif;font-weight:900;font-size:10px;text-transform:uppercase;letter-spacing:0.1em;padding:6px 14px;margin-bottom:20px;">Confirmed</div>
+      <h1 style="font-family:Arial Black,Arial,sans-serif;font-weight:900;font-size:28px;text-transform:uppercase;margin:0 0 16px;">You're In.</h1>
+      <p style="font-size:14px;line-height:1.7;color:#555;">Your email has been confirmed and entered into the early access raffle. If selected, you'll receive access before anyone else.</p>
+    </div>
+  </body></html>`);
+});
+
+// ── SEND DOUBLE OPT-IN EMAIL (Step 1) ──
+async function sendDoubleOptInEmail(email, confirmUrl) {
+  const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#F5F5F5;font-family:Arial,Helvetica,sans-serif;color:#1A1A1A;">
+  <div style="max-width:560px;margin:0 auto;padding:40px 20px;">
+    <div style="background:#fff;border:1.5px solid #1A1A1A;padding:36px 32px;">
+      <div style="font-family:'Arial Black',Arial,sans-serif;font-weight:900;font-size:14px;text-transform:uppercase;letter-spacing:0.08em;text-align:center;margin-bottom:32px;">European Beauty Group</div>
+      <div style="text-align:center;margin-bottom:24px;">
+        <span style="display:inline-block;background:#1A1A1A;color:#fff;font-family:'Arial Black',Arial,sans-serif;font-weight:900;font-size:10px;text-transform:uppercase;letter-spacing:0.1em;padding:6px 14px;">Confirm Your Entry</span>
+      </div>
+      <h1 style="font-family:'Arial Black',Arial,sans-serif;font-weight:900;font-size:28px;text-transform:uppercase;margin:0 0 16px;line-height:1.2;text-align:center;">One More Step.</h1>
+      <hr style="border:none;border-top:1px solid #E0E0E0;margin:24px 0;">
+      <p style="font-size:14px;line-height:1.7;margin:0 0 16px;text-align:center;">Click the button below to confirm your email and enter the early access raffle.</p>
+      <div style="text-align:center;margin:28px 0;">
+        <a href="${confirmUrl}" style="display:inline-block;background:#1A1A1A;color:#fff;font-family:'Arial Black',Arial,sans-serif;font-weight:900;font-size:13px;text-transform:uppercase;letter-spacing:0.04em;padding:16px 48px;text-decoration:none;border:1.5px solid #1A1A1A;">Confirm Email</a>
+      </div>
+      <p style="font-size:12px;line-height:1.7;margin:0;text-align:center;color:#888;">If you didn't sign up, you can ignore this email.</p>
+    </div>
+    <div style="text-align:center;margin-top:32px;font-size:11px;color:#AAA;line-height:1.6;">
+      <strong>European Beauty Group</strong><br>
+      <a href="https://europeanbeautygroup.com" style="color:#888;">europeanbeautygroup.com</a>
+    </div>
+  </div>
+</body>
+</html>`;
+
+  await smtpTransport.sendMail({
+    from: '"European Beauty Group" <' + (process.env.SMTP_USER || 'offer@europeanbeautygroup.com') + '>',
+    replyTo: 'support@europeanbeautygroup.com',
+    to: email,
+    subject: 'Confirm your entry — E.B.G. Early Access Raffle',
+    html: html
+  });
+}
+
+// ── SEND RAFFLE CONFIRMED EMAIL (Step 2, after they click confirm) ──
 async function sendSignupEmail(email) {
   const html = `
 <!DOCTYPE html>
