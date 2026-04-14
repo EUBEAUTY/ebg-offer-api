@@ -133,10 +133,22 @@ app.post('/offer', rateLimit, async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'Invalid product.' });
     }
 
-    console.log(`[OFFER] ${product} | ${offerPrice}€ | Size: ${size}`);
-
     const offer = parseFloat(offerPrice);
-    const threshold = parseFloat(offerThreshold);
+    const listed = parseFloat(listedPrice);
+
+    // ── Compute threshold server-side: 60% of listed price (minimum) ──
+    // This prevents clients from sending a fake/NaN minimumOffer to bypass validation
+    const serverMinimum = Math.floor(listed * 0.60);
+    const clientThreshold = parseFloat(offerThreshold);
+    const threshold = (!isNaN(clientThreshold) && clientThreshold > 0) ? Math.max(clientThreshold, serverMinimum) : serverMinimum;
+
+    // ── SERVER-SIDE: Reject offers below our computed minimum ──
+    if (offer < threshold) {
+      console.log(`[REJECTED] ${offer}€ < server minimum ${threshold}€ for ${product}`);
+      return res.status(400).json({ status: 'error', message: `Offer must be at least ${threshold + 1}€.` });
+    }
+
+    console.log(`[OFFER] ${product} | ${offer}€ | Size: ${size} | Threshold: ${threshold}€`);
 
     // ── CHECK STOCK before doing anything ──
     if (variantId) {
@@ -165,85 +177,47 @@ app.post('/offer', rateLimit, async (req, res) => {
     // Release lock immediately — we'll process async
     if (variantId) processingVariants.delete(variantId);
 
-    if (offer >= threshold) {
-      // ── AUTO-ACCEPT: delay for realism ──
-      const delayMin = Math.floor(Math.random() * 120) + 1;
-      const delayMs = delayMin * 60 * 1000;
-      console.log(`[AUTO-ACCEPT] ${offer}€ >= ${threshold}€ — will process in ${delayMin} minutes`);
+    // ── ACCEPT: process immediately (no delay — Render free tier kills setTimeout) ──
+    console.log(`[ACCEPTED] ${offer}€ >= ${threshold}€ — processing now`);
 
-      // Capture all data before setTimeout (req may be gone)
-      const offerData = {
-        product, size, email, name, variantId,
-        listedPrice: parseFloat(listedPrice),
-        offerPrice: offer,
-        productImage: req.body.productImage || ''
-      };
+    const offerData = {
+      product, size, email, name, variantId,
+      listedPrice: listed,
+      offerPrice: offer,
+      productImage: req.body.productImage || ''
+    };
 
-      // Process in background after delay
-      setTimeout(async () => {
+    const draftResult = await createDraftOrder(offerData);
+
+    if (draftResult.success) {
+      console.log(`[DRAFT ORDER] Created #${draftResult.draftOrderId}`);
+      console.log(`[SENDING EMAIL] to ${email} with invoice URL: ${draftResult.invoiceUrl}`);
+
+      // Send custom branded email
+      try {
+        await sendCustomEmail({
+          ...offerData,
+          invoiceUrl: draftResult.invoiceUrl
+        });
+        console.log(`[EMAIL] Branded email sent for ${product}`);
+      } catch (emailErr) {
+        console.error(`[EMAIL ERROR] ${emailErr.message}`);
+        // Fallback to Shopify invoice if custom email fails
         try {
-          // Re-check stock before creating draft order
-          if (offerData.variantId) {
-            const stock = await checkVariantStock(offerData.variantId);
-            if (stock <= 0) {
-              console.log(`[EXPIRED] Variant ${offerData.variantId} sold out before delayed accept`);
-              return;
-            }
-          }
-
-          console.log(`[PROCESSING] Creating draft order...`);
-          const draftResult = await createDraftOrder(offerData);
-
-          if (draftResult.success) {
-            console.log(`[DRAFT ORDER] Created #${draftResult.draftOrderId} (after ${delayMin}min delay)`);
-            console.log(`[SENDING EMAIL] to ${offerData.email} with invoice URL: ${draftResult.invoiceUrl}`);
-
-            // Send custom branded email
-            try {
-              await sendCustomEmail({
-                ...offerData,
-                invoiceUrl: draftResult.invoiceUrl
-              });
-              console.log(`[EMAIL] Branded email sent for ${offerData.product}`);
-            } catch (emailErr) {
-              console.error(`[EMAIL ERROR] ${emailErr.message}`);
-              // Fallback to Shopify invoice if custom email fails
-              try {
-                await sendShopifyInvoice(draftResult.draftOrderId, offerData);
-                console.log(`[FALLBACK] Shopify invoice sent for ${offerData.product}`);
-              } catch (fallbackErr) {
-                console.error(`[FALLBACK ERROR] ${fallbackErr.message}`);
-              }
-            }
-
-            // Schedule expiry check (24h from invoice sent)
-            setTimeout(() => checkAndExpire(draftResult.draftOrderId, offerData.variantId), 24 * 60 * 60 * 1000);
-          } else {
-            console.error(`[ERROR] Draft order failed:`, draftResult.error);
-          }
-        } catch (err) {
-          console.error(`[ERROR] Delayed processing failed:`, err.message);
-          console.error(`[ERROR STACK]`, err.stack);
+          await sendShopifyInvoice(draftResult.draftOrderId, offerData);
+          console.log(`[FALLBACK] Shopify invoice sent for ${product}`);
+        } catch (fallbackErr) {
+          console.error(`[FALLBACK ERROR] ${fallbackErr.message}`);
         }
-      }, delayMs);
-
-      // Respond immediately to customer
-      return res.json({
-        status: 'submitted',
-        message: 'Offer submitted for review.'
-      });
-
+      }
     } else {
-      // ── BELOW THRESHOLD: notify for manual review ──
-      console.log(`[PENDING] ${offer}€ < ${threshold}€ — needs manual review`);
-
-      await sendContactForm({ product, size, listedPrice, offerPrice: offer, email, name, productUrl });
-
-      return res.json({
-        status: 'submitted',
-        message: 'Offer submitted for review.'
-      });
+      console.error(`[ERROR] Draft order failed:`, draftResult.error);
     }
+
+    return res.json({
+      status: 'submitted',
+      message: 'Offer submitted for review.'
+    });
 
   } catch (err) {
     console.error('[ERROR]', err);
